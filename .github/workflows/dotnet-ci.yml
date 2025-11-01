@@ -1,0 +1,83 @@
+name: .NET CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ "**" ]
+
+# Prevent overlapping runs on the same branch
+concurrency:
+  group: dotnet-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        dotnet: [ "6.0.x", "7.0.x", "8.0.x" ]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET ${{ matrix.dotnet }}
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ matrix.dotnet }}
+
+      # Cache the global NuGet package folder
+      - name: Cache NuGet
+        id: nuget-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ matrix.dotnet }}-${{ hashFiles('**/*.csproj', '**/packages.lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-${{ matrix.dotnet }}-
+            ${{ runner.os }}-nuget-
+
+      # Optional: authenticate to private NuGet feeds (Azure Artifacts, GitHub Packages, etc.)
+      # 1) Add a repo secret named NUGET_AUTH_TOKEN (PAT or feed token)
+      # 2) If using GitHub Packages, also set NUGET_SOURCE to "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+      - name: Configure private feeds
+        if: env.NUGET_SOURCE && secrets.NUGET_AUTH_TOKEN
+        run: |
+          dotnet nuget update source private \
+            --username "${{ github.actor }}" \
+            --password "${{ secrets.NUGET_AUTH_TOKEN }}" \
+            --store-password-in-clear-text \
+            --source "$NUGET_SOURCE" || \
+          dotnet nuget add source "$NUGET_SOURCE" \
+            --name private \
+            --username "${{ github.actor }}" \
+            --password "${{ secrets.NUGET_AUTH_TOKEN }}" \
+            --store-password-in-clear-text
+        env:
+          NUGET_SOURCE: ${{ vars.NUGET_SOURCE }}
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build (Release)
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Test (with TRX + Coverage)
+        run: |
+          dotnet test --configuration Release --no-build \
+            --logger "trx;LogFileName=test_results.trx" \
+            --collect:"XPlat Code Coverage"
+
+      # Gather artifacts (TRX + coverage)
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-dotnet-${{ matrix.dotnet }}
+          path: |
+            **/TestResults/*.trx
+            **/TestResults/*/coverage.cobertura.xml
+          if-no-files-found: warn
